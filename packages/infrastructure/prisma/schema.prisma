@@ -1,0 +1,1206 @@
+// W1 schema: tenancy platform core (TEN-001..003, IAM-001..005).
+// Every tenant-scoped table carries a denormalized orgId so row-level
+// security policies (prisma/rls/001-tenant-rls.sql) can enforce isolation
+// and tenant-aware queries stay index-friendly.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Organization {
+  id        String             @id @default(cuid())
+  slug      String             @unique
+  name      String
+  status    OrganizationStatus @default(ACTIVE)
+  createdAt DateTime           @default(now())
+  updatedAt DateTime           @updatedAt
+
+  stores      Store[]
+  storefronts Storefront[]
+  branches    Branch[]
+  domains     Domain[]
+  memberships Membership[]
+  auditEvents AuditEvent[]
+  products    Product[]
+  variants    ProductVariant[]
+  categories  Category[]
+  collections Collection[]
+  collectionProducts CollectionProduct[]
+  assets      Asset[]
+  productRevisions ProductRevision[]
+  priceLists  PriceList[]
+  prices      Price[]
+  promotions  Promotion[]
+  inventoryItems InventoryItem[]
+  reservations Reservation[]
+  carts       Cart[]
+  checkouts   Checkout[]
+  orders      Order[]
+  idempotencyRecords IdempotencyRecord[]
+  cartItems   CartItem[]
+  orderLines  OrderLine[]
+  paymentIntents PaymentIntent[]
+  journals    Journal[]
+  settlements Settlement[]
+  taxRates    TaxRate[]
+  webhookEvents  WebhookEvent[]
+  paymentAttempts PaymentAttempt[]
+  refunds     Refund[]
+  journalLines JournalLine[]
+  fulfillments Fulfillment[]
+  returns     Return[]
+  shippingRates ShippingRate[]
+  fulfillmentLines FulfillmentLine[]
+  returnLines ReturnLine[]
+  trackingEvents TrackingEvent[]
+  pages       Page[]
+  pageRevisions PageRevision[]
+  blockDefinitions BlockDefinition[]
+  themes      Theme[]
+  themeTemplates ThemeTemplate[]
+  forkLinks   ForkLink[]
+  cloneManifests CloneManifest[]
+  orderSequence OrderSequence?
+  outboxEvents OutboxEvent[]
+  searchDocuments SearchDocument[]
+  plugins     Plugin[]
+  webhookSubscriptions WebhookSubscription[]
+  webhookDeliveries WebhookDelivery[]
+  analyticsEvents AnalyticsEvent[]
+  rateLimitPolicies RateLimitPolicy[]
+  rateLimitCounters RateLimitCounter[]
+}
+
+/// Per-organization order number allocator. `nextSequence` upserts this row
+/// atomically (INSERT ... ON CONFLICT DO UPDATE ... RETURNING) so concurrent
+/// order placements can never draw the same sequence.
+model OrderSequence {
+  orgId     String @id
+  nextValue Int    @default(1)
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+}
+
+enum OrganizationStatus {
+  ACTIVE
+  SUSPENDED
+  CLOSED
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships Membership[]
+}
+
+model Membership {
+  id        String   @id @default(cuid())
+  orgId     String
+  userId    String
+  role      Role
+  createdAt DateTime @default(now())
+
+  org  Organization @relation(fields: [orgId], references: [id])
+  user User         @relation(fields: [userId], references: [id])
+
+  @@unique([userId, orgId])
+  @@index([orgId])
+}
+
+enum Role {
+  OWNER
+  ADMIN
+  STORE_ADMIN
+  CATALOG_ADMIN
+  ORDER_MANAGER
+  FINANCE
+  DESIGNER
+  SUPPORT
+  MEMBER
+}
+
+model Store {
+  id        String      @id @default(cuid())
+  orgId     String
+  slug      String
+  name      String
+  status    StoreStatus @default(ACTIVE)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  org         Organization  @relation(fields: [orgId], references: [id])
+  storefronts Storefront[]
+  branches    Branch[]
+
+  @@unique([orgId, slug])
+  @@index([orgId])
+}
+
+enum StoreStatus {
+  ACTIVE
+  INACTIVE
+}
+
+model Storefront {
+  id        String   @id @default(cuid())
+  orgId     String
+  storeId   String
+  name      String
+  locale    String
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  org     Organization @relation(fields: [orgId], references: [id])
+  store   Store        @relation(fields: [storeId], references: [id])
+  domains Domain[]
+
+  @@index([orgId])
+  @@index([storeId])
+}
+
+model Branch {
+  id        String     @id @default(cuid())
+  orgId     String
+  storeId   String
+  name      String
+  kind      BranchKind
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  org   Organization @relation(fields: [orgId], references: [id])
+  store Store        @relation(fields: [storeId], references: [id])
+
+  @@index([orgId])
+  @@index([storeId])
+}
+
+enum BranchKind {
+  RETAIL_LOCATION
+  WAREHOUSE
+  FULFILLMENT
+  BUSINESS_UNIT
+}
+
+model Domain {
+  id           String   @id @default(cuid())
+  orgId        String
+  storefrontId String
+  host         String   @unique
+  isPrimary    Boolean  @default(false)
+  verified     Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  org        Organization @relation(fields: [orgId], references: [id])
+  storefront Storefront   @relation(fields: [storefrontId], references: [id])
+
+  @@index([orgId])
+}
+
+model AuditEvent {
+  id          String   @id @default(cuid())
+  orgId       String
+  actorId     String
+  action      String
+  subjectType String
+  subjectId   String
+  before      Json?
+  after       Json?
+  requestId   String?
+  ip          String?
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@index([orgId, createdAt])
+  @@index([subjectType, subjectId])
+}
+
+// ── Catalog (W2, CAT-001..004) ─────────────────────────────────────────────
+
+model Product {
+  id             String        @id @default(cuid())
+  orgId          String
+  slug           String
+  title          String
+  description    String?
+  seoTitle       String?
+  seoDescription String?
+  status         ProductStatus @default(DRAFT)
+  options        Json
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  org             Organization        @relation(fields: [orgId], references: [id])
+  variants        ProductVariant[]
+  revisions       ProductRevision[]
+  collectionLinks CollectionProduct[]
+
+  @@unique([orgId, slug])
+  @@index([orgId])
+}
+
+enum ProductStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+model ProductVariant {
+  id           String   @id @default(cuid())
+  orgId        String
+  productId    String
+  sku          String
+  barcode      String?
+  optionValues Json
+  weightGrams  Int?
+  createdAt    DateTime @default(now())
+
+  org      Organization   @relation(fields: [orgId], references: [id])
+  product  Product        @relation(fields: [productId], references: [id])
+  prices   Price[]
+  stockItems InventoryItem[]
+  cartItems  CartItem[]
+  orderLines OrderLine[]
+  fulfillmentLines FulfillmentLine[]
+  returnLines ReturnLine[]
+
+  @@unique([orgId, sku])
+  @@index([orgId, productId])
+}
+
+model Category {
+  id        String   @id @default(cuid())
+  orgId     String
+  parentId  String?
+  slug      String
+  name      String
+  createdAt DateTime @default(now())
+
+  org      Organization @relation(fields: [orgId], references: [id])
+  parent   Category?    @relation("CategoryTree", fields: [parentId], references: [id])
+  children Category[]   @relation("CategoryTree")
+
+  @@unique([orgId, slug])
+  @@index([orgId])
+  @@index([parentId])
+}
+
+model Collection {
+  id        String         @id @default(cuid())
+  orgId     String
+  slug      String
+  name      String
+  kind      CollectionKind @default(MANUAL)
+  createdAt DateTime       @default(now())
+
+  org          Organization        @relation(fields: [orgId], references: [id])
+  productLinks CollectionProduct[]
+
+  @@unique([orgId, slug])
+  @@index([orgId])
+}
+
+enum CollectionKind {
+  MANUAL
+}
+
+model CollectionProduct {
+  orgId        String   @id @default(cuid())
+  collectionId String
+  productId    String
+  createdAt    DateTime @default(now())
+
+  org        Organization @relation(fields: [orgId], references: [id])
+  collection Collection   @relation(fields: [collectionId], references: [id])
+  product    Product      @relation(fields: [productId], references: [id])
+
+  @@unique([collectionId, productId])
+  @@index([orgId])
+  @@index([productId])
+}
+
+model Asset {
+  id         String    @id @default(cuid())
+  orgId      String
+  kind       AssetKind
+  storageKey String    @unique
+  mime       String
+  sizeBytes  Int
+  checksum   String?
+  createdAt  DateTime  @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@index([orgId])
+}
+
+enum AssetKind {
+  IMAGE
+  VIDEO
+  FILE
+}
+
+model ProductRevision {
+  id             String   @id @default(cuid())
+  orgId          String
+  productId      String
+  revisionNumber Int
+  snapshot       Json
+  authorId       String
+  createdAt      DateTime @default(now())
+
+  org     Organization @relation(fields: [orgId], references: [id])
+  product Product      @relation(fields: [productId], references: [id])
+
+  @@unique([productId, revisionNumber])
+  @@index([orgId])
+}
+
+// ── Pricing & Inventory (W3, PRICE-001..003, INV-001..003) ────────────────
+
+model PriceList {
+  id        String    @id @default(cuid())
+  orgId     String
+  currency  String
+  priority  Int
+  isActive  Boolean   @default(true)
+  validFrom DateTime?
+  validTo   DateTime?
+  createdAt DateTime  @default(now())
+
+  org    Organization @relation(fields: [orgId], references: [id])
+  prices Price[]
+
+  @@index([orgId, currency, isActive])
+}
+
+model Price {
+  id            String   @id @default(cuid())
+  orgId         String
+  priceListId   String
+  variantId     String
+  minQuantity   Int
+  unitPriceMinor BigInt
+  createdAt     DateTime @default(now())
+
+  org       Organization  @relation(fields: [orgId], references: [id])
+  priceList PriceList     @relation(fields: [priceListId], references: [id])
+  variant   ProductVariant @relation(fields: [variantId], references: [id])
+
+  @@index([orgId, variantId])
+  @@index([priceListId, variantId, minQuantity])
+}
+
+model Promotion {
+  id            String        @id @default(cuid())
+  orgId         String
+  name          String
+  kind          PromotionKind
+  percentageBps Int?
+  amountMinor   BigInt?
+  currency      String?
+  priority      Int
+  exclusive     Boolean       @default(false)
+  isActive      Boolean       @default(true)
+  createdAt     DateTime      @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@index([orgId, isActive])
+}
+
+enum PromotionKind {
+  PERCENTAGE
+  FIXED
+}
+
+model InventoryItem {
+  id        String   @id @default(cuid())
+  orgId     String
+  variantId String
+  locationId String?
+  onHand    Int
+  reserved  Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  org     Organization    @relation(fields: [orgId], references: [id])
+  variant ProductVariant  @relation(fields: [variantId], references: [id])
+  reservations Reservation[]
+
+  @@index([orgId, variantId])
+}
+
+model Reservation {
+  id          String            @id @default(cuid())
+  orgId       String
+  itemId      String
+  quantity    Int
+  status      ReservationStatus @default(ACTIVE)
+  expiresAt   DateTime
+  createdAt   DateTime          @default(now())
+  releasedAt  DateTime?
+  committedAt DateTime?
+
+  org  Organization  @relation(fields: [orgId], references: [id])
+  item InventoryItem @relation(fields: [itemId], references: [id])
+
+  @@index([orgId, status, expiresAt])
+  @@index([itemId])
+}
+
+enum ReservationStatus {
+  ACTIVE
+  COMMITTED
+  RELEASED
+  EXPIRED
+}
+
+// ── Cart / Checkout / Orders (W4, CART-001..002, CHK-001..002, ORD-001..002)
+
+model Cart {
+  id         String     @id @default(cuid())
+  orgId      String
+  customerId String?
+  currency   String
+  status     CartStatus @default(OPEN)
+  expiresAt  DateTime
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  org        Organization @relation(fields: [orgId], references: [id])
+  items      CartItem[]
+  checkouts  Checkout[]
+
+  @@index([orgId, status, expiresAt])
+}
+
+enum CartStatus {
+  OPEN
+  CONVERTED
+  EXPIRED
+  CANCELLED
+}
+
+model CartItem {
+  id        String   @id @default(cuid())
+  orgId     String
+  cartId    String
+  variantId String
+  quantity  Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  cart    Cart           @relation(fields: [cartId], references: [id])
+  org     Organization   @relation(fields: [orgId], references: [id])
+  variant ProductVariant @relation(fields: [variantId], references: [id])
+
+  @@unique([cartId, variantId])
+  @@index([orgId])
+}
+
+model Checkout {
+  id         String         @id @default(cuid())
+  orgId      String
+  cartId     String
+  status     CheckoutStatus @default(CART)
+  currency   String
+  customerId String?
+  quote      Json?
+  address    Json?
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  org   Organization @relation(fields: [orgId], references: [id])
+  cart  Cart         @relation(fields: [cartId], references: [id])
+  orders Order[]
+
+  @@index([orgId, status])
+  @@index([cartId])
+}
+
+enum CheckoutStatus {
+  CART
+  PRICED
+  CUSTOMER_CAPTURED
+  ADDRESS_CAPTURED
+  REVIEWED
+  PAYMENT_PENDING
+  PAYMENT_CONFIRMED
+  ORDER_CONFIRMED
+  FULFILLING
+  COMPLETED
+  CANCELLED
+  PAYMENT_FAILED
+  EXPIRED
+}
+
+model Order {
+  id           String      @id @default(cuid())
+  orgId        String
+  sequence     Int
+  orderNumber  String
+  checkoutId   String
+  customerId   String?
+  currency     String
+  status       OrderStatus @default(PENDING_PAYMENT)
+  subtotalMinor BigInt
+  discountMinor BigInt
+  totalMinor   BigInt
+  placedAt     DateTime    @default(now())
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  org       Organization @relation(fields: [orgId], references: [id])
+  checkout  Checkout     @relation(fields: [checkoutId], references: [id])
+  lines     OrderLine[]
+  paymentIntents PaymentIntent[]
+  fulfillments Fulfillment[]
+  returns   Return[]
+
+  @@unique([orgId, sequence])
+  @@unique([orgId, orderNumber])
+  @@index([orgId, status, placedAt])
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  CONFIRMED
+  FULFILLING
+  PARTIALLY_FULFILLED
+  COMPLETED
+  CANCELLED
+}
+
+model OrderLine {
+  id                String @id @default(cuid())
+  orgId             String
+  orderId           String
+  variantId         String
+  sku               String
+  title             String
+  quantity          Int
+  unitPriceMinor    BigInt
+  lineTotalMinor    BigInt
+  lineDiscountMinor BigInt
+
+  org     Organization   @relation(fields: [orgId], references: [id])
+  order   Order          @relation(fields: [orderId], references: [id])
+  variant ProductVariant @relation(fields: [variantId], references: [id])
+  fulfillmentLines FulfillmentLine[]
+  returnLines ReturnLine[]
+
+  @@index([orgId, orderId])
+}
+
+model IdempotencyRecord {
+  id             String           @id @default(cuid())
+  orgId          String
+  key            String
+  status         IdempotencyStatus @default(PENDING)
+  requestHash    String
+  resultSnapshot Json?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@unique([orgId, key])
+  @@index([orgId, status])
+}
+
+enum IdempotencyStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+// ── Payments & Finance (W5, PAY-001..003, FIN-001..002) ───────────────────
+
+model PaymentIntent {
+  id         String              @id @default(cuid())
+  orgId      String
+  orderId    String
+  currency   String
+  amountMinor BigInt
+  status     PaymentIntentStatus @default(CREATED)
+  providerId String?
+  providerRef String?
+  createdAt  DateTime            @default(now())
+  updatedAt  DateTime            @updatedAt
+
+  org      Organization    @relation(fields: [orgId], references: [id])
+  order    Order           @relation(fields: [orderId], references: [id])
+  attempts PaymentAttempt[]
+  refunds  Refund[]
+
+  @@index([orgId, orderId, status])
+}
+
+enum PaymentIntentStatus {
+  CREATED
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  CANCELED
+}
+
+model PaymentAttempt {
+  id            String               @id @default(cuid())
+  orgId         String
+  intentId      String
+  status        PaymentAttemptStatus
+  providerId    String?
+  providerRef   String?
+  failureReason String?
+  createdAt     DateTime             @default(now())
+
+  org    Organization  @relation(fields: [orgId], references: [id])
+  intent PaymentIntent @relation(fields: [intentId], references: [id])
+
+  @@index([orgId, intentId])
+}
+
+enum PaymentAttemptStatus {
+  PROCESSING
+  SUCCEEDED
+  FAILED
+}
+
+model Refund {
+  id         String       @id @default(cuid())
+  orgId      String
+  intentId   String
+  currency   String
+  amountMinor BigInt
+  status     RefundStatus @default(REQUESTED)
+  reason     String
+  providerRef String?
+  createdAt  DateTime     @default(now())
+  settledAt  DateTime?
+
+  org    Organization  @relation(fields: [orgId], references: [id])
+  intent PaymentIntent @relation(fields: [intentId], references: [id])
+  returns Return[]
+
+  @@index([orgId, intentId, status])
+}
+
+enum RefundStatus {
+  REQUESTED
+  APPROVED
+  EXECUTED
+  REJECTED
+  FAILED
+}
+
+model WebhookEvent {
+  id          String             @id @default(cuid())
+  orgId       String
+  provider    String
+  eventId     String
+  type        String
+  payload     Json
+  status      WebhookEventStatus @default(RECEIVED)
+  receivedAt  DateTime           @default(now())
+  processedAt DateTime?
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@unique([orgId, provider, eventId])
+  @@index([orgId, status])
+}
+
+enum WebhookEventStatus {
+  RECEIVED
+  PROCESSED
+  IGNORED
+  FAILED
+}
+
+// ── Fulfillment & Returns (W6) ─────────────────────────────────────────────
+
+model Fulfillment {
+  id            String            @id @default(cuid())
+  orgId         String
+  orderId       String
+  kind          FulfillmentKind   @default(SHIP)
+  status        FulfillmentStatus @default(PENDING)
+  trackingNumber String?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  org    Organization      @relation(fields: [orgId], references: [id])
+  order  Order             @relation(fields: [orderId], references: [id])
+  lines  FulfillmentLine[]
+  tracking TrackingEvent[]
+
+  @@index([orgId, orderId, status])
+}
+
+enum FulfillmentKind {
+  SHIP
+  PICKUP
+}
+
+enum FulfillmentStatus {
+  PENDING
+  SHIPPED
+  READY_FOR_PICKUP
+  DELIVERED
+  CANCELLED
+}
+
+model FulfillmentLine {
+  id            String @id @default(cuid())
+  orgId         String
+  fulfillmentId String
+  orderLineId   String
+  variantId     String
+  quantity      Int
+
+  org         Organization   @relation(fields: [orgId], references: [id])
+  fulfillment Fulfillment    @relation(fields: [fulfillmentId], references: [id])
+  orderLine   OrderLine      @relation(fields: [orderLineId], references: [id])
+  variant     ProductVariant @relation(fields: [variantId], references: [id])
+
+  @@index([orgId, fulfillmentId])
+  @@index([orderLineId])
+}
+
+model TrackingEvent {
+  id            String   @id @default(cuid())
+  orgId         String
+  fulfillmentId String
+  occurredAt    DateTime
+  description   String
+  location      String?
+  createdAt     DateTime @default(now())
+
+  org         Organization @relation(fields: [orgId], references: [id])
+  fulfillment Fulfillment  @relation(fields: [fulfillmentId], references: [id])
+
+  @@index([orgId, fulfillmentId])
+}
+
+model Return {
+  id        String      @id @default(cuid())
+  orgId     String
+  orderId   String
+  status    ReturnStatus @default(REQUESTED)
+  reason    String
+  refundId  String?
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  org    Organization @relation(fields: [orgId], references: [id])
+  order  Order        @relation(fields: [orderId], references: [id])
+  refund Refund?      @relation(fields: [refundId], references: [id])
+  lines  ReturnLine[]
+
+  @@index([orgId, orderId, status])
+}
+
+enum ReturnStatus {
+  REQUESTED
+  APPROVED
+  RECEIVED
+  COMPLETED
+  REJECTED
+  CANCELLED
+}
+
+model ReturnLine {
+  id          String @id @default(cuid())
+  orgId       String
+  returnId    String
+  orderLineId String
+  variantId   String
+  quantity    Int
+
+  org       Organization   @relation(fields: [orgId], references: [id])
+  return    Return         @relation(fields: [returnId], references: [id])
+  orderLine OrderLine      @relation(fields: [orderLineId], references: [id])
+  variant   ProductVariant @relation(fields: [variantId], references: [id])
+
+  @@index([orgId, returnId])
+  @@index([orderLineId])
+}
+
+model ShippingRate {
+  id             String           @id @default(cuid())
+  orgId          String
+  name           String
+  kind           ShippingRateKind
+  currency       String
+  amountMinor    BigInt
+  maxWeightGrams Int?
+  country        String?
+  isActive       Boolean          @default(true)
+  createdAt      DateTime         @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@index([orgId, currency, isActive])
+}
+
+enum ShippingRateKind {
+  FLAT
+  PICKUP
+}
+
+// ── CMS (W7, CMS-001..004) ─────────────────────────────────────────────────
+
+model Page {
+  id                      String     @id @default(cuid())
+  orgId                   String
+  slug                    String
+  title                   String
+  locale                  String
+  status                  PageStatus @default(DRAFT)
+  publishedRevisionNumber Int?
+  scheduledFor            DateTime?
+  scheduledRevisionNumber Int?
+  createdAt               DateTime   @default(now())
+  updatedAt               DateTime   @updatedAt
+
+  org        Organization   @relation(fields: [orgId], references: [id])
+  revisions  PageRevision[]
+
+  @@unique([orgId, slug, locale])
+  @@index([orgId, status])
+}
+
+enum PageStatus {
+  DRAFT
+  PUBLISHED
+  SCHEDULED
+  ARCHIVED
+}
+
+model PageRevision {
+  id             String   @id @default(cuid())
+  orgId          String
+  pageId         String
+  revisionNumber Int
+  schemaVersion  Int
+  schema         Json
+  seo            Json
+  authorId       String
+  createdAt      DateTime @default(now())
+
+  org   Organization @relation(fields: [orgId], references: [id])
+  page  Page         @relation(fields: [pageId], references: [id])
+
+  @@unique([pageId, revisionNumber])
+  @@index([orgId, pageId])
+}
+
+// ── Builder & Theme (W8, BLD-001..005, THEME-001..002) ────────────────────
+
+model BlockDefinition {
+  id              String   @id @default(cuid())
+  orgId           String
+  type            String
+  name            String
+  kind            String
+  fields          Json
+  allowedChildren Json?
+  isSection       Boolean  @default(false)
+  createdAt       DateTime @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@unique([orgId, type])
+  @@index([orgId])
+}
+
+model Theme {
+  id        String   @id @default(cuid())
+  orgId     String
+  name      String
+  tokens    Json
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  org       Organization     @relation(fields: [orgId], references: [id])
+  templates ThemeTemplate[]
+
+  @@index([orgId, isActive])
+}
+
+model ThemeTemplate {
+  id      String @id @default(cuid())
+  orgId   String
+  themeId String?
+  name    String
+  kind    String
+  root    Json
+  createdAt DateTime @default(now())
+
+  org   Organization @relation(fields: [orgId], references: [id])
+  theme Theme?       @relation(fields: [themeId], references: [id])
+
+  @@index([orgId, themeId])
+}
+
+// ── Clone / Fork (W9) ──────────────────────────────────────────────────────
+
+model ForkLink {
+  id             String         @id @default(cuid())
+  orgId          String
+  entityType     String
+  entityId       String
+  parentOrgId    String
+  parentEntityId String
+  overrides      Json
+  status         ForkLinkStatus @default(ACTIVE)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@unique([orgId, entityType, entityId])
+  @@index([orgId, status])
+}
+
+enum ForkLinkStatus {
+  ACTIVE
+  DETACHED
+}
+
+model CloneManifest {
+  id          String   @id @default(cuid())
+  orgId       String
+  sourceOrgId String
+  profile     String
+  manifest    Json
+  createdAt   DateTime @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@index([orgId])
+}
+
+model Journal {
+  id         String   @id @default(cuid())
+  orgId      String
+  currency   String
+  effectiveAt DateTime
+  memo       String
+  sourceType String
+  sourceId   String
+  createdAt  DateTime @default(now())
+
+  org      Organization  @relation(fields: [orgId], references: [id])
+  lines    JournalLine[]
+
+  @@unique([orgId, sourceType, sourceId])
+  @@index([orgId, effectiveAt])
+}
+
+model JournalLine {
+  id          String @id @default(cuid())
+  orgId       String
+  journalId   String
+  accountCode String
+  accountKind AccountKind
+  debitMinor  BigInt
+  creditMinor BigInt
+
+  org     Organization @relation(fields: [orgId], references: [id])
+  journal Journal      @relation(fields: [journalId], references: [id])
+
+  @@index([orgId, journalId])
+  @@index([accountCode])
+}
+
+enum AccountKind {
+  ASSET
+  LIABILITY
+  INCOME
+  EXPENSE
+  EQUITY
+}
+
+model Settlement {
+  id          String   @id @default(cuid())
+  orgId       String
+  provider    String
+  currency    String
+  grossMinor  BigInt
+  feeMinor    BigInt
+  netMinor    BigInt
+  periodStart DateTime
+  periodEnd   DateTime
+  createdAt   DateTime @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@index([orgId, provider])
+}
+
+model TaxRate {
+  id            String   @id @default(cuid())
+  orgId         String
+  name          String
+  percentageBps Int
+  jurisdiction  String
+  effectiveFrom DateTime
+  effectiveTo   DateTime?
+  createdAt     DateTime @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@index([orgId, jurisdiction])
+}
+
+// ── Search / Outbox (W11) ──────────────────────────────────────────────────
+
+model OutboxEvent {
+  id          String   @id @default(cuid())
+  orgId       String
+  type        String
+  payload     Json
+  createdAt   DateTime @default(now())
+  processedAt DateTime?
+  attempts    Int      @default(0)
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@index([orgId, processedAt, createdAt])
+}
+
+model SearchDocument {
+  id            String   @id @default(cuid())
+  orgId         String
+  kind          String
+  entityId      String
+  slug          String
+  locale        String
+  title         String
+  body          String
+  currency      String?
+  priceMinor    BigInt?
+  collectionIds Json
+  published     Boolean
+  updatedAt     DateTime @updatedAt
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@unique([orgId, kind, entityId])
+  @@index([orgId, kind, published])
+}
+
+// ── Extensions (W13) ───────────────────────────────────────────────────────
+
+model Plugin {
+  id         String       @id @default(cuid())
+  orgId      String
+  name       String
+  manifest   Json
+  status     PluginStatus @default(ENABLED)
+  installedAt DateTime    @default(now())
+  updatedAt  DateTime     @updatedAt
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@unique([orgId, name])
+  @@index([orgId, status])
+}
+
+enum PluginStatus {
+  ENABLED
+  DISABLED
+}
+
+model WebhookSubscription {
+  id        String   @id @default(cuid())
+  orgId     String
+  url       String
+  events    Json
+  secret    String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  org       Organization       @relation(fields: [orgId], references: [id])
+  deliveries WebhookDelivery[]
+
+  @@index([orgId, isActive])
+}
+
+model WebhookDelivery {
+  id             String   @id @default(cuid())
+  orgId          String
+  subscriptionId String
+  outboxEventId  String
+  eventType      String
+  payload        Json
+  signature      String
+  timestampMs    BigInt
+  status         String   @default("PENDING")
+  attempts       Int      @default(0)
+  createdAt      DateTime @default(now())
+  deliveredAt    DateTime?
+
+  org          Organization       @relation(fields: [orgId], references: [id])
+  subscription WebhookSubscription @relation(fields: [subscriptionId], references: [id])
+
+  @@index([orgId, status])
+  @@index([subscriptionId, status])
+}
+
+// ── Analytics & Rate limiting (W12/W14) ────────────────────────────────────
+
+model AnalyticsEvent {
+  id         String   @id @default(cuid())
+  orgId      String
+  name       String
+  version    Int
+  sessionId  String
+  userId     String?
+  properties Json
+  occurredAt DateTime @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@index([orgId, name, version, occurredAt])
+  @@index([orgId, sessionId])
+}
+
+model RateLimitPolicy {
+  id            String   @id @default(cuid())
+  orgId         String
+  route         String
+  limit         Int
+  windowSeconds Int
+  createdAt     DateTime @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@unique([orgId, route])
+  @@index([orgId])
+}
+
+model RateLimitCounter {
+  id        String @id @default(cuid())
+  orgId     String
+  route     String
+  windowKey String
+  hits      Int    @default(0)
+
+  org Organization @relation(fields: [orgId], references: [id])
+
+  @@unique([orgId, route, windowKey])
+  @@index([orgId, windowKey])
+}

@@ -1,0 +1,30 @@
+# dependencies
+node_modules/
+
+# builds
+.next/
+dist/
+out/
+build/
+*.tsbuildinfo
+
+# turbo
+.turbo/
+
+# testing
+coverage/
+playwright-report/
+test-results/
+
+# env
+.env
+.env.*
+!.env.example
+
+# misc
+.DS_Store
+Thumbs.db
+*.log
+
+# local tooling state
+.mimosa/

@@ -1,0 +1,61 @@
+# Local development stack (ADR-002 / roadmap §22 infra).
+# Usage: docker compose -f infra/docker/docker-compose.dev.yml up -d
+# Credentials below are for local development only.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: finalshop-postgres
+    environment:
+      POSTGRES_USER: finalshop
+      POSTGRES_PASSWORD: finalshop
+      POSTGRES_DB: finalshop
+    ports:
+      # Host port is parameterized so the container can avoid clashing with a
+      # native PostgreSQL already listening on 5432 (e.g. local dev machine).
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U finalshop"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: finalshop-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.12
+    container_name: finalshop-meilisearch
+    environment:
+      MEILI_MASTER_KEY: dev_meili_master_key_change_me
+      MEILI_NO_ANALYTICS: "true"
+    ports:
+      - "7700:7700"
+    volumes:
+      - meilidata:/meili_data
+
+  minio:
+    image: minio/minio:latest
+    container_name: finalshop-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: finalshop
+      MINIO_ROOT_PASSWORD: dev_minio_password_change_me
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+
+volumes:
+  pgdata:
+  redisdata:
+  meilidata:
+  miniodata:
